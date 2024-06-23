@@ -1,9 +1,9 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, g
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField
-from wtforms.validators import DataRequired, Length, EqualTo
+from wtforms import StringField, PasswordField, SubmitField, DecimalField, TextAreaField
+from wtforms.validators import DataRequired, Length, EqualTo, URL
 import mysql.connector
-from mysql.connector import errorcode
+from config import ADMIN_USERNAME, ADMIN_PASSWORD
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your_secret_key'
@@ -16,7 +16,7 @@ db_config = {
     'database': 'flaskpyweb'  # Replace with your desired MySQL database name
 }
 
-# Function to initialize the database and table
+# Function to initialize the database and tables
 def init_db():
     try:
         conn = mysql.connector.connect(
@@ -61,7 +61,7 @@ def init_db():
         cursor.close()
         conn.close()
 
-# Initialize the database and table
+# Initialize the database and tables
 init_db()
 
 # Connect to the database using Flask's context-sensitive g object
@@ -89,6 +89,13 @@ class SignInForm(FlaskForm):
     password = PasswordField('Password', validators=[DataRequired()])
     submit = SubmitField('Sign In')
 
+class ProductForm(FlaskForm):
+    name = StringField('Name', validators=[DataRequired(), Length(max=100)])
+    description = TextAreaField('Description')
+    price = DecimalField('Price', validators=[DataRequired()])
+    image_url = StringField('Image URL', validators=[DataRequired(), URL()])
+    submit = SubmitField('Save Product')
+
 # Routes
 @app.route('/')
 def index():
@@ -103,17 +110,27 @@ def signup():
         password = form.password.data
         cursor = get_db().cursor()
         try:
-            cursor.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s)", (username, email, password))
-            get_db().commit()
-            cursor.close()
-            flash('Account created successfully! You can now sign in.', 'success')
-            return redirect(url_for('signin'))
+            # Check if the username or email already exists
+            cursor.execute("SELECT * FROM users WHERE username = %s OR email = %s", (username, email))
+            existing_user = cursor.fetchone()
+            if existing_user:
+                flash('Username or email already exists. Please choose another.', 'danger')
+            else:
+                if email == "admin" and password == "admin":
+                    flash('Account cannot be created with these credentials. Please choose another email and password.', 'danger')
+                else:
+                    cursor.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s)", (username, email, password))
+                    get_db().commit()
+                    flash('Account created successfully! You can now sign in.', 'success')
+                    return redirect(url_for('signin'))
         except mysql.connector.Error as err:
             print(f"Error: {err}")  # Print the error to the console for debugging
             flash(f"Error: {err}", 'danger')
             get_db().rollback()
+        finally:
             cursor.close()
     return render_template('signup.html', form=form)
+
 
 @app.route('/signin', methods=['GET', 'POST'])
 def signin():
@@ -121,19 +138,31 @@ def signin():
     if form.validate_on_submit():
         email = form.email.data
         password = form.password.data
-        cursor = get_db().cursor()
-        cursor.execute("SELECT * FROM users WHERE email = %s AND password = %s", (email, password))
-        user = cursor.fetchone()
-        cursor.close()
 
-        print(user)
-        if user:
-            session['username'] = user[1]  # Store username in session
-            flash(f"Welcome, {user[1]}!", 'success')
-            return redirect(url_for('dashboard'))
-        else:
-            flash('Invalid email or password', 'danger')
+        cursor = get_db().cursor()
+        try:
+            cursor.execute("SELECT * FROM users WHERE email = %s AND password = %s", (email, password))
+            user = cursor.fetchone()
+            cursor.close()
+
+            if email == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                session['username'] = ADMIN_USERNAME  # Store admin username in session
+                flash('Admin login successful.', 'success')
+                return redirect(url_for('admindashboard'))
+            elif user:
+                session['username'] = user[1]  # Store regular user username in session
+                flash(f"Welcome, {user[1]}!", 'success')
+                return redirect(url_for('dashboard'))
+            else:
+                flash('Invalid email or password', 'danger')
+        except mysql.connector.Error as err:
+            print(f"Error: {err}")  # Print the error to the console for debugging
+            flash(f"Error: {err}", 'danger')
+
     return render_template('signin.html', form=form)
+
+
+
 
 @app.route('/dashboard')
 def dashboard():
@@ -165,7 +194,54 @@ def dashboard():
         flash(f"Error retrieving products: {err}", 'danger')
         return redirect(url_for('signin'))
 
+@app.route('/admindashboard', methods=['GET', 'POST'])
+def admindashboard():
+    if 'username' not in session:
+        flash('Please sign in to access this page.', 'danger')
+        return redirect(url_for('signin'))
 
+    form = ProductForm()
+    if form.validate_on_submit():
+        name = form.name.data
+        description = form.description.data
+        price = form.price.data
+        image_url = form.image_url.data
+
+        cursor = get_db().cursor()
+        try:
+            cursor.execute("INSERT INTO products (name, description, price, image_url) VALUES (%s, %s, %s, %s)", (name, description, price, image_url))
+            get_db().commit()
+            flash('Product added successfully!', 'success')
+            return redirect(url_for('admindashboard'))
+        except mysql.connector.Error as err:
+            print(f"Error: {err}")  # Print the error to the console for debugging
+            flash(f"Error: {err}", 'danger')
+            get_db().rollback()
+        finally:
+            cursor.close()
+
+    try:
+        cursor = get_db().cursor()
+        cursor.execute("SELECT * FROM products")
+        products = cursor.fetchall()
+        cursor.close()
+
+        products_list = []
+        for product in products:
+            product_dict = {
+                'id': product[0],
+                'name': product[1],
+                'description': product[2],
+                'price': float(product[3]),  # Convert Decimal to float if needed
+                'image_url': product[4]
+            }
+            products_list.append(product_dict)
+
+        return render_template('admindashboard.html', username=session['username'], form=form, products=products_list)
+
+    except mysql.connector.Error as err:
+        flash(f"Error retrieving products: {err}", 'danger')
+        return redirect(url_for('signin'))
 
 @app.route('/logout')
 def logout():
