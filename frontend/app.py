@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session
+from flask import Flask, render_template, request, redirect, url_for, flash, session, g
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Length, EqualTo
@@ -22,8 +22,7 @@ def init_db():
         conn = mysql.connector.connect(
             host=db_config['host'],
             user=db_config['user'],
-            password=db_config['password'],
-            database=db_config['database']
+            password=db_config['password']
         )
         cursor = conn.cursor()
 
@@ -37,7 +36,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INT AUTO_INCREMENT PRIMARY KEY,
             username VARCHAR(50) NOT NULL UNIQUE,
+            email VARCHAR(100) NOT NULL UNIQUE,
             password VARCHAR(100) NOT NULL
+        )
+        """)
+
+        # Create products table if not exists
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            description TEXT,
+            price DECIMAL(10, 2),
+            image_url VARCHAR(255)
         )
         """)
 
@@ -53,18 +64,28 @@ def init_db():
 # Initialize the database and table
 init_db()
 
-# Connect to the database
-db = mysql.connector.connect(**db_config)
+# Connect to the database using Flask's context-sensitive g object
+def get_db():
+    if 'db' not in g:
+        g.db = mysql.connector.connect(**db_config)
+    return g.db
+
+@app.teardown_appcontext
+def teardown_db(error):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 # WTForms for user input validation
 class SignUpForm(FlaskForm):
     username = StringField('Username', validators=[DataRequired(), Length(min=4, max=25)])
+    email = StringField('Email', validators=[DataRequired(), Length(min=4, max=100)])
     password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
     confirm_password = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password')])
     submit = SubmitField('Sign Up')
 
 class SignInForm(FlaskForm):
-    username = StringField('Username', validators=[DataRequired(), Length(min=4, max=25)])
+    email = StringField('Email', validators=[DataRequired(), Length(min=4, max=100)])
     password = PasswordField('Password', validators=[DataRequired()])
     submit = SubmitField('Sign In')
 
@@ -78,18 +99,19 @@ def signup():
     form = SignUpForm()
     if form.validate_on_submit():
         username = form.username.data
+        email = form.email.data
         password = form.password.data
-        cursor = db.cursor()
+        cursor = get_db().cursor()
         try:
-            cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, password))
-            db.commit()
+            cursor.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s)", (username, email, password))
+            get_db().commit()
             cursor.close()
             flash('Account created successfully! You can now sign in.', 'success')
             return redirect(url_for('signin'))
         except mysql.connector.Error as err:
             print(f"Error: {err}")  # Print the error to the console for debugging
             flash(f"Error: {err}", 'danger')
-            db.rollback()
+            get_db().rollback()
             cursor.close()
     return render_template('signup.html', form=form)
 
@@ -97,18 +119,20 @@ def signup():
 def signin():
     form = SignInForm()
     if form.validate_on_submit():
-        username = form.username.data
+        email = form.email.data
         password = form.password.data
-        cursor = db.cursor()
-        cursor.execute("SELECT * FROM users WHERE username = %s AND password = %s", (username, password))
+        cursor = get_db().cursor()
+        cursor.execute("SELECT * FROM users WHERE email = %s AND password = %s", (email, password))
         user = cursor.fetchone()
         cursor.close()
+
+        print(user)
         if user:
-            session['username'] = username
-            flash(f"Welcome, {username}!", 'success')
+            session['username'] = user[1]  # Store username in session
+            flash(f"Welcome, {user[1]}!", 'success')
             return redirect(url_for('dashboard'))
         else:
-            flash('Invalid username or password', 'danger')
+            flash('Invalid email or password', 'danger')
     return render_template('signin.html', form=form)
 
 @app.route('/dashboard')
@@ -117,14 +141,31 @@ def dashboard():
         flash('Please sign in to access this page.', 'danger')
         return redirect(url_for('signin'))
 
-    # Example products (replace with actual fetching from database)
-    products = [
-        {'name': 'Product 1', 'description': 'Description of Product 1', 'price': 19.99, 'image_url': 'https://via.placeholder.com/300'},
-        {'name': 'Product 2', 'description': 'Description of Product 2', 'price': 29.99, 'image_url': 'https://via.placeholder.com/300'},
-        {'name': 'Product 3', 'description': 'Description of Product 3', 'price': 39.99, 'image_url': 'https://via.placeholder.com/300'},
-    ]
+    try:
+        cursor = get_db().cursor()
+        cursor.execute("SELECT * FROM products")
+        products = cursor.fetchall()
+        cursor.close()
 
-    return render_template('dashboard.html', username=session['username'], products=products)
+        # If products is not empty, construct a list of dictionaries for easier access in Jinja template
+        products_list = []
+        for product in products:
+            product_dict = {
+                'id': product[0],
+                'name': product[1],
+                'description': product[2],
+                'price': float(product[3]),  # Convert Decimal to float if needed
+                'image_url': product[4]
+            }
+            products_list.append(product_dict)
+
+        return render_template('dashboard.html', username=session['username'], products=products_list)
+
+    except mysql.connector.Error as err:
+        flash(f"Error retrieving products: {err}", 'danger')
+        return redirect(url_for('signin'))
+
+
 
 @app.route('/logout')
 def logout():
